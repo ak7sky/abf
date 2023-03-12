@@ -1,21 +1,22 @@
 package service
 
 import (
-	"abf-service/internal/core"
-	"abf-service/internal/core/model"
 	"fmt"
 	"math"
 	"math/bits"
 	"strconv"
 	"time"
+
+	"github.com/ak7sky/abf-service/internal/core"
+	"github.com/ak7sky/abf-service/internal/core/model"
 )
 
 var (
-	errCheckIpInList    = "failed to check IP in"
+	errCheckIPInList    = "failed to check IP in"
 	errCheckBucket      = "failed to check bucket of"
 	errResetBucket      = "failed to reset bucket"
-	errAddIpToList      = "failed to add ip to"
-	errRemoveIpFromList = "failed to remove ip from"
+	errAddIPToList      = "failed to add ip to"
+	errRemoveIPFromList = "failed to remove ip from"
 )
 
 type BucketCapacities struct {
@@ -37,19 +38,19 @@ func New(netStorage core.NetStorage, bucketStorage core.BucketStorage, bktCap Bu
 }
 
 func (rlsrv *RateLimitService) Ok(login string, pswd string, ip uint32) (bool, error) {
-	isIpWhListed, err := rlsrv.isIpInList(ip, model.White)
+	isIPWhListed, err := rlsrv.isIPInList(ip, model.White)
 	if err != nil {
 		return false, err
 	}
-	if isIpWhListed {
+	if isIPWhListed {
 		return true, nil
 	}
 
-	isIpBlListed, err := rlsrv.isIpInList(ip, model.Black)
+	isIPBlListed, err := rlsrv.isIPInList(ip, model.Black)
 	if err != nil {
 		return false, err
 	}
-	if isIpBlListed {
+	if isIPBlListed {
 		return false, nil
 	}
 
@@ -61,7 +62,7 @@ func (rlsrv *RateLimitService) Ok(login string, pswd string, ip uint32) (bool, e
 	if !ok {
 		return false, err
 	}
-	ok, err = rlsrv.addToBucket(model.IpBkt, strconv.Itoa(int(ip)))
+	ok, err = rlsrv.addToBucket(model.IPBkt, strconv.Itoa(int(ip)))
 	if !ok {
 		return false, err
 	}
@@ -72,11 +73,11 @@ func (rlsrv *RateLimitService) Ok(login string, pswd string, ip uint32) (bool, e
 func (rlsrv *RateLimitService) Reset(login string, ip uint32) error {
 	loginBucket, err := rlsrv.bktStorage.Get(login)
 	if err != nil {
-		return fmt.Errorf("%s '%s': %v", errResetBucket, login, err)
+		return fmt.Errorf("%s '%s': %w", errResetBucket, login, err)
 	}
 	ipBucket, err := rlsrv.bktStorage.Get(strconv.Itoa(int(ip)))
 	if err != nil {
-		return fmt.Errorf("%s '%d': %v", errResetBucket, ip, err)
+		return fmt.Errorf("%s '%d': %w", errResetBucket, ip, err)
 	}
 
 	if loginBucket == nil {
@@ -91,10 +92,10 @@ func (rlsrv *RateLimitService) Reset(login string, ip uint32) error {
 	ipBucket.Reset()
 
 	if err = rlsrv.bktStorage.Save(loginBucket); err != nil {
-		return fmt.Errorf("%s '%s': %v", errResetBucket, login, err)
+		return fmt.Errorf("%s '%s': %w", errResetBucket, login, err)
 	}
 	if err = rlsrv.bktStorage.Save(ipBucket); err != nil {
-		return fmt.Errorf("%v '%d': %v", errResetBucket, ip, err)
+		return fmt.Errorf("%v '%d': %w", errResetBucket, ip, err)
 	}
 
 	return nil
@@ -103,9 +104,8 @@ func (rlsrv *RateLimitService) Reset(login string, ip uint32) error {
 func (rlsrv *RateLimitService) AddToList(ip uint32, maskLen uint8, netType model.NetType) error {
 	netAddr := ip & calcMask(maskLen)
 	net, err := rlsrv.netStorage.Get(netAddr, netType)
-
 	if err != nil {
-		return fmt.Errorf("%s %s: %v", errAddIpToList, netType, err)
+		return fmt.Errorf("%s %s: %w", errAddIPToList, netType, err)
 	}
 
 	if net != nil {
@@ -119,7 +119,7 @@ func (rlsrv *RateLimitService) AddToList(ip uint32, maskLen uint8, netType model
 
 	err = rlsrv.netStorage.Save(net, netType)
 	if err != nil {
-		return fmt.Errorf("%s %s: %v", errAddIpToList, netType, err)
+		return fmt.Errorf("%s %s: %w", errAddIPToList, netType, err)
 	}
 
 	return nil
@@ -129,15 +129,15 @@ func (rlsrv *RateLimitService) RemoveFromList(ip uint32, maskLen uint8, netType 
 	netAddr := ip & calcMask(maskLen)
 	err := rlsrv.netStorage.Delete(netAddr, maskLen, netType)
 	if err != nil {
-		return fmt.Errorf("%s %s: %v", errRemoveIpFromList, netType, err)
+		return fmt.Errorf("%s %s: %w", errRemoveIPFromList, netType, err)
 	}
 	return nil
 }
 
-func (rlsrv *RateLimitService) isIpInList(ip uint32, netType model.NetType) (bool, error) {
+func (rlsrv *RateLimitService) isIPInList(ip uint32, netType model.NetType) (bool, error) {
 	nets, err := rlsrv.netStorage.GetList(netType)
 	if err != nil {
-		return false, fmt.Errorf("%s %s: %v", errCheckIpInList, netType, err)
+		return false, fmt.Errorf("%s %s: %w", errCheckIPInList, netType, err)
 	}
 	for _, network := range nets {
 		if network.Contains(ip) {
@@ -150,7 +150,7 @@ func (rlsrv *RateLimitService) isIpInList(ip uint32, netType model.NetType) (boo
 func (rlsrv *RateLimitService) addToBucket(bt model.BktType, id string) (bool, error) {
 	bucket, err := rlsrv.bktStorage.Get(id)
 	if err != nil {
-		return false, fmt.Errorf("%s %s: %v", errCheckBucket, bt, err)
+		return false, fmt.Errorf("%s %s: %w", errCheckBucket, bt, err)
 	}
 
 	if bucket == nil {
@@ -159,7 +159,7 @@ func (rlsrv *RateLimitService) addToBucket(bt model.BktType, id string) (bool, e
 			bucket = model.NewBucket(id, rlsrv.bktCap.loginBktCap, time.Minute)
 		case model.PswdBkt:
 			bucket = model.NewBucket(id, rlsrv.bktCap.pswdBktCap, time.Minute)
-		case model.IpBkt:
+		case model.IPBkt:
 			bucket = model.NewBucket(id, rlsrv.bktCap.ipBktCap, time.Minute)
 		}
 	}
@@ -169,7 +169,7 @@ func (rlsrv *RateLimitService) addToBucket(bt model.BktType, id string) (bool, e
 
 	err = rlsrv.bktStorage.Save(bucket)
 	if err != nil {
-		return false, fmt.Errorf("%s %s: %v", errCheckBucket, bt, err)
+		return false, fmt.Errorf("%s %s: %w", errCheckBucket, bt, err)
 	}
 
 	return true, nil

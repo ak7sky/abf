@@ -1,4 +1,4 @@
-module abf-service
+module github.com/ak7sky/abf-service
 
 go 1.19
 

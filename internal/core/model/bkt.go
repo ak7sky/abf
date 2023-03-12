@@ -10,7 +10,7 @@ type BktType string
 const (
 	LoginBkt = "login"
 	PswdBkt  = "password"
-	IpBkt    = "ip"
+	IPBkt    = "ip"
 )
 
 type Bucket struct {
@@ -46,7 +46,7 @@ func (bucket *Bucket) Add() bool {
 		return false
 	}
 
-	bucket.FreeSpace -= 1
+	bucket.FreeSpace--
 	return true
 }
 

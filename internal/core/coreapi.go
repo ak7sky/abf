@@ -1,6 +1,6 @@
 package core
 
-import "abf-service/internal/core/model"
+import "github.com/ak7sky/abf-service/internal/core/model"
 
 type RateLimitingService interface {
 	Ok(login string, pswd string, ip uint32) (bool, error)

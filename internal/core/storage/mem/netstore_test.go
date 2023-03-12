@@ -1,12 +1,13 @@
 package mem
 
 import (
-	"abf-service/internal/core/model"
 	"encoding/binary"
-	"github.com/stretchr/testify/require"
-	"github.com/stretchr/testify/suite"
 	"sync"
 	"testing"
+
+	"github.com/ak7sky/abf-service/internal/core/model"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 )
 
 type netMemStorageTestSuit struct {

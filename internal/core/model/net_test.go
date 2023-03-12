@@ -62,5 +62,4 @@ func TestNet_Contains(t *testing.T) {
 			require.Equal(t, tc.expected, net.Contains(ipToCheckUint32))
 		})
 	}
-
 }

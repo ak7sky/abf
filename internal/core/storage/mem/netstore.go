@@ -1,8 +1,9 @@
 package mem
 
 import (
-	"abf-service/internal/core/model"
 	"sync"
+
+	"github.com/ak7sky/abf-service/internal/core/model"
 )
 
 type NetMemStorage struct {

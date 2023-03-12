@@ -1,10 +1,11 @@
 package model
 
 import (
-	"github.com/stretchr/testify/require"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestBucket_Add(t *testing.T) {
