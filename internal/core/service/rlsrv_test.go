@@ -15,14 +15,19 @@ import (
 
 type mockNetStorage struct {
 	mock.Mock
+	getCallsCnt  int
+	saveCallsCnt int
+	delCallsCnt  int
 }
 
 func (mns *mockNetStorage) Save(net *model.Net, netType model.NetType) error {
+	mns.saveCallsCnt++
 	args := mns.Called(net, netType)
 	return args.Error(0)
 }
 
 func (mns *mockNetStorage) Get(addr uint32, netType model.NetType) (*model.Net, error) {
+	mns.getCallsCnt++
 	args := mns.Called(addr, netType)
 	return args.Get(0).(*model.Net), args.Error(1)
 }
@@ -33,22 +38,25 @@ func (mns *mockNetStorage) GetList(netType model.NetType) ([]*model.Net, error) 
 }
 
 func (mns *mockNetStorage) Delete(addr uint32, maskLen uint8, netType model.NetType) error {
+	mns.delCallsCnt++
 	args := mns.Called(addr, maskLen, netType)
 	return args.Error(0)
 }
 
 type mockBucketStorage struct {
 	mock.Mock
-	triedToSave []*model.Bucket
+	getCallsCnt  int
+	saveCallsCnt int
 }
 
 func (mbs *mockBucketStorage) Save(bucket *model.Bucket) error {
-	mbs.triedToSave = append(mbs.triedToSave, bucket)
+	mbs.saveCallsCnt++
 	args := mbs.Called(bucket)
 	return args.Error(0)
 }
 
 func (mbs *mockBucketStorage) Get(id string) (*model.Bucket, error) {
+	mbs.getCallsCnt++
 	args := mbs.Called(id)
 	return args.Get(0).(*model.Bucket), args.Error(1)
 }
@@ -58,515 +66,390 @@ func (mbs *mockBucketStorage) Delete(id string) error {
 	return args.Error(0)
 }
 
-func TestOk(t *testing.T) {
-	t.Run("true: ip in white list", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
+func TestOkIPCheck(t *testing.T) {
+	inIP := ipV4(192, 168, 72, 31)
+	testCases := []struct {
+		name                         string
+		errGetWhtList, errGetBlkList error
+		whtList, blkList             []*model.Net
+		expResult                    bool
+		expErr                       error
+	}{
+		{
+			name: "true: white listed ip",
+			whtList: []*model.Net{
+				{Addr: ipV4(192, 168, 0, 0), MaskLen: 16},
+				{Addr: ipV4(192, 168, 5, 0), MaskLen: 24},
+			},
+			expResult: true,
+		},
+		{
+			name:          "false: err get white list",
+			errGetWhtList: errors.New("any err"),
+			expResult:     false,
+			expErr:        fmt.Errorf("%s %s: %w", errCheckIPInList, model.White, errors.New("any err")),
+		},
+		{
+			name: "false: black listed ip",
+			blkList: []*model.Net{
+				{Addr: ipV4(192, 168, 0, 0), MaskLen: 16},
+				{Addr: ipV4(192, 168, 5, 0), MaskLen: 24},
+			},
+			expResult: false,
+		},
+		{
+			name:          "false: err get black list",
+			errGetBlkList: errors.New("any err"),
+			expResult:     false,
+			expErr:        fmt.Errorf("%s %s: %w", errCheckIPInList, model.Black, errors.New("any err")),
+		},
+	}
 
-		whiteList := []*model.Net{
-			{Addr: ipV4(192, 168, 0, 0), MaskLen: 16},
-			{Addr: ipV4(192, 168, 5, 0), MaskLen: 24},
-		}
-		netStorage.On("GetList", model.White).Return(whiteList, nil)
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-		ok, err := rlsrv.Ok("login123", "login123p@ssw0rD", ipV4(192, 168, 72, 31))
+			netStorage := &mockNetStorage{}
+			bktStorage := &mockBucketStorage{}
+			netStorage.On("GetList", model.White).Return(tc.whtList, tc.errGetWhtList)
+			netStorage.On("GetList", model.Black).Return(tc.blkList, tc.errGetBlkList)
+			rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
 
-		require.NoError(t, err)
-		require.True(t, ok)
-		netStorage.AssertCalled(t, "GetList", model.White)
-	})
+			ok, err := rlsrv.Ok("login123", "login123p@ssw0rD", inIP)
+			require.Equal(t, err, tc.expErr)
+			require.Equal(t, tc.expResult, ok)
+		})
+	}
+}
 
-	t.Run("false: err get white list", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
+func TestOkBucketsCheck(t *testing.T) {
+	inLogin, inPswd, inIP := "login123", "login123p@ssw0rD", ipV4(192, 168, 72, 31)
+	testCases := []struct {
+		name                                          string
+		currLoginBkt, currPswdBkt, currIPBkt          *model.Bucket
+		errGetLoginBkt, errGetPswdBkt, errGetIPBkt    error
+		errSaveLoginBkt, errSavePswdBkt, errSaveIPBkt error
+		expGetCallsCnt                                int
+		expSaveCallsCnt                               int
+		expResult                                     bool
+		expErr                                        error
+	}{
+		{
+			name:            "true: new bkts",
+			expGetCallsCnt:  3, // get 3 buckets: login, pswd, ip
+			expSaveCallsCnt: 3, // save 3 new buckets: login, pswd, ip
+			expResult:       true,
+		},
+		{
+			name:            "true: bkts free space > 0",
+			currLoginBkt:    freeBkt(inLogin, 10),
+			currPswdBkt:     freeBkt(inPswd, 100),
+			currIPBkt:       freeBkt(iptoa(inIP), 1000),
+			expGetCallsCnt:  3, // get 3 buckets: login, pswd, ip
+			expSaveCallsCnt: 3, // save 3 existing buckets: login, pswd, ip
+			expResult:       true,
+		},
+		{
+			name:            "false: login bkt full",
+			currLoginBkt:    fullBkt(inLogin, 10),
+			expGetCallsCnt:  1, // get 1 bucket: login
+			expSaveCallsCnt: 0, // no calls of save
+			expResult:       false,
+		},
+		{
+			name:            "false: pswd bkt full",
+			currLoginBkt:    freeBkt(inLogin, 10),
+			currPswdBkt:     fullBkt(inPswd, 100),
+			expGetCallsCnt:  2, // get 2 buckets: login, pswd
+			expSaveCallsCnt: 1, // save 1 bucket: login
+			expResult:       false,
+		},
+		{
+			name:            "false: ip bkt full",
+			currLoginBkt:    freeBkt(inLogin, 10),
+			currPswdBkt:     freeBkt(inPswd, 100),
+			currIPBkt:       fullBkt(iptoa(inIP), 1000),
+			expGetCallsCnt:  3, // get 3 buckets: login, pswd, ip
+			expSaveCallsCnt: 2, // save 2 bucket: login, pswd
+			expResult:       false,
+		},
+		{
+			name:            "false: err get login bkt",
+			errGetLoginBkt:  errors.New("any err"),
+			expResult:       false,
+			expGetCallsCnt:  1, // get 1 bucket: login
+			expSaveCallsCnt: 0, // no calls of save
+			expErr:          fmt.Errorf("%s %s: %w", errCheckBucket, model.LoginBkt, errors.New("any err")),
+		},
+		{
+			name:            "false: err get pswd bkt",
+			errGetPswdBkt:   errors.New("any err"),
+			expResult:       false,
+			expErr:          fmt.Errorf("%s %s: %w", errCheckBucket, model.PswdBkt, errors.New("any err")),
+			expGetCallsCnt:  2, // get 2 buckets: login, pswd
+			expSaveCallsCnt: 1, // save 1 bucket: login
+		},
+		{
+			name:            "false: err get ip bkt",
+			errGetIPBkt:     errors.New("any err"),
+			expResult:       false,
+			expGetCallsCnt:  3, // get 2 bucket: login, pswd, ip
+			expSaveCallsCnt: 2, // save 2 buckets: login, pswd
+			expErr:          fmt.Errorf("%s %s: %w", errCheckBucket, model.IPBkt, errors.New("any err")),
+		},
+		{
+			name:            "false: err save login bkt",
+			errSaveLoginBkt: errors.New("any err"),
+			expResult:       false,
+			expGetCallsCnt:  1, // get 1 bucket: login
+			expSaveCallsCnt: 1, // save 1 bucket: login
+			expErr:          fmt.Errorf("%s %s: %w", errCheckBucket, model.LoginBkt, errors.New("any err")),
+		},
+		{
+			name:            "false: err save pswd bkt",
+			errSavePswdBkt:  errors.New("any err"),
+			expResult:       false,
+			expGetCallsCnt:  2, // get 2 buckets: login, pswd
+			expSaveCallsCnt: 2, // save 2 buckets: login, pswd
+			expErr:          fmt.Errorf("%s %s: %w", errCheckBucket, model.PswdBkt, errors.New("any err")),
+		},
+		{
+			name:            "false: err save ip bkt",
+			errSaveIPBkt:    errors.New("any err"),
+			expResult:       false,
+			expGetCallsCnt:  3, // get 3 buckets: login, pswd, ip
+			expSaveCallsCnt: 3, // save 3 buckets: login, pswd, ip
+			expErr:          fmt.Errorf("%s %s: %w", errCheckBucket, model.IPBkt, errors.New("any err")),
+		},
+	}
 
-		expErrStorage := errors.New("error during getting white list")
-		netStorage.On("GetList", model.White).Return(([]*model.Net)(nil), expErrStorage)
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-		ok, err := rlsrv.Ok("login123", "login123p@ssw0rD", ipV4(192, 168, 72, 31))
+			netStorage := &mockNetStorage{}
+			bktStorage := &mockBucketStorage{}
+			netStorage.On("GetList", model.White).Return([]*model.Net{}, nil)
+			netStorage.On("GetList", model.Black).Return([]*model.Net{}, nil)
+			bktStorage.On("Get", inLogin).Return(tc.currLoginBkt, tc.errGetLoginBkt)
+			bktStorage.On("Get", inPswd).Return(tc.currPswdBkt, tc.errGetPswdBkt)
+			bktStorage.On("Get", iptoa(inIP)).Return(tc.currIPBkt, tc.errGetIPBkt)
+			bktStorage.On("Save", mock.MatchedBy(bktIDMatcher(inLogin))).Return(tc.errSaveLoginBkt)
+			bktStorage.On("Save", mock.MatchedBy(bktIDMatcher(inPswd))).Return(tc.errSavePswdBkt)
+			bktStorage.On("Save", mock.MatchedBy(bktIDMatcher(iptoa(inIP)))).Return(tc.errSaveIPBkt)
 
-		require.EqualError(t, err, fmt.Sprintf("%s %s: %v", errCheckIPInList, model.White, expErrStorage))
-		require.False(t, ok)
-		netStorage.AssertCalled(t, "GetList", model.White)
-	})
+			rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
 
-	t.Run("false: ip in black list", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
+			ok, err := rlsrv.Ok(inLogin, inPswd, inIP)
 
-		netStorage.On("GetList", model.White).Return([]*model.Net{}, nil)
-
-		blackList := []*model.Net{
-			{Addr: ipV4(192, 168, 0, 0), MaskLen: 16},
-			{Addr: ipV4(192, 168, 5, 0), MaskLen: 24},
-		}
-		netStorage.On("GetList", model.Black).Return(blackList, nil)
-
-		ok, err := rlsrv.Ok("login123", "login123p@ssw0rD", ipV4(192, 168, 72, 31))
-
-		require.NoError(t, err)
-		require.False(t, ok)
-		netStorage.AssertCalled(t, "GetList", model.White)
-		netStorage.AssertCalled(t, "GetList", model.Black)
-	})
-
-	t.Run("false: err get black list", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		netStorage.On("GetList", model.White).Return([]*model.Net{}, nil)
-
-		expErrStorage := errors.New("error during getting black list")
-		netStorage.On("GetList", model.Black).Return(([]*model.Net)(nil), expErrStorage)
-
-		ok, err := rlsrv.Ok("login123", "login123p@ssw0rD", ipV4(192, 168, 72, 31))
-
-		require.EqualError(t, err, fmt.Sprintf("%s %s: %v", errCheckIPInList, model.Black, expErrStorage))
-		require.False(t, ok)
-		netStorage.AssertCalled(t, "GetList", model.White)
-		netStorage.AssertCalled(t, "GetList", model.Black)
-	})
-
-	t.Run("false: err get bkt", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		netStorage.On("GetList", model.White).Return([]*model.Net{}, nil)
-		netStorage.On("GetList", model.Black).Return([]*model.Net{}, nil)
-
-		inputLogin := "login123"
-		errGetLoginBkt := errors.New("err during getting login bkt")
-		bktStorage.On("Get", inputLogin).Return((*model.Bucket)(nil), errGetLoginBkt)
-
-		ok, err := rlsrv.Ok(inputLogin, "login123p@ssw0rD", ipV4(192, 168, 72, 31))
-
-		require.EqualError(t, err, fmt.Sprintf("%s %s: %v", errCheckBucket, model.LoginBkt, errGetLoginBkt))
-		require.False(t, ok)
-		netStorage.AssertCalled(t, "GetList", model.White)
-		netStorage.AssertCalled(t, "GetList", model.Black)
-		bktStorage.AssertCalled(t, "Get", inputLogin)
-	})
-
-	t.Run("false: bkt full", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		netStorage.On("GetList", model.White).Return([]*model.Net{}, nil)
-		netStorage.On("GetList", model.Black).Return([]*model.Net{}, nil)
-
-		inputLogin := "login123"
-		expLoginBkt := model.NewBucket(inputLogin, 5, time.Minute)
-		expLoginBkt.FreeSpace = 0
-		bktStorage.On("Get", inputLogin).Return(expLoginBkt, nil)
-
-		ok, err := rlsrv.Ok(inputLogin, "login123p@ssw0rD", ipV4(192, 168, 72, 31))
-
-		require.NoError(t, err)
-		require.False(t, ok)
-
-		netStorage.AssertCalled(t, "GetList", model.White)
-		netStorage.AssertCalled(t, "GetList", model.Black)
-		bktStorage.AssertCalled(t, "Get", inputLogin)
-	})
-
-	t.Run("false: err save bkt", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		netStorage.On("GetList", model.White).Return([]*model.Net{}, nil)
-		netStorage.On("GetList", model.Black).Return([]*model.Net{}, nil)
-
-		inputLogin := "login123"
-		expLoginBkt := model.NewBucket(inputLogin, 5, time.Minute)
-		expLoginBkt.FreeSpace = 4
-		bktStorage.On("Get", inputLogin).Return(expLoginBkt, nil)
-
-		errSaveLoginBkt := errors.New("err during saving login bkt")
-		bktStorage.On("Save", expLoginBkt).Return(errSaveLoginBkt)
-
-		ok, err := rlsrv.Ok(inputLogin, "login123p@ssw0rD", ipV4(192, 168, 72, 31))
-
-		require.EqualError(t, err, fmt.Sprintf("%s %s: %v", errCheckBucket, model.LoginBkt, errSaveLoginBkt))
-		require.False(t, ok)
-
-		netStorage.AssertCalled(t, "GetList", model.White)
-		netStorage.AssertCalled(t, "GetList", model.Black)
-		bktStorage.AssertCalled(t, "Get", inputLogin)
-		bktStorage.AssertCalled(t, "Save", expLoginBkt)
-	})
-
-	t.Run("true: bkts have free space", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		netStorage.On("GetList", model.White).Return([]*model.Net{}, nil)
-		netStorage.On("GetList", model.Black).Return([]*model.Net{}, nil)
-
-		inputLogin, inputPswd, inputIP := "login123", "login123p@ssw0rD", ipV4(192, 168, 72, 31)
-
-		expLoginBkt := model.NewBucket(inputLogin, 5, time.Minute)
-		expPswdBkt := model.NewBucket(inputPswd, 10, time.Minute)
-		expIPBkt := model.NewBucket(iptoa(inputIP), 1000, time.Minute)
-
-		expLoginBkt.FreeSpace--
-		expPswdBkt.FreeSpace--
-		expIPBkt.FreeSpace--
-
-		bktStorage.On("Get", inputLogin).Return(expLoginBkt, nil)
-		bktStorage.On("Get", inputPswd).Return(expPswdBkt, nil)
-		bktStorage.On("Get", iptoa(inputIP)).Return(expIPBkt, nil)
-
-		bktStorage.On("Save", expLoginBkt).Return(nil)
-		bktStorage.On("Save", expPswdBkt).Return(nil)
-		bktStorage.On("Save", expIPBkt).Return(nil)
-
-		ok, err := rlsrv.Ok(inputLogin, inputPswd, inputIP)
-
-		require.True(t, ok)
-		require.NoError(t, err)
-
-		netStorage.AssertCalled(t, "GetList", model.White)
-		netStorage.AssertCalled(t, "GetList", model.Black)
-		bktStorage.AssertCalled(t, "Get", inputLogin)
-		bktStorage.AssertCalled(t, "Get", inputPswd)
-		bktStorage.AssertCalled(t, "Get", iptoa(inputIP))
-		bktStorage.AssertCalled(t, "Save", expLoginBkt)
-		bktStorage.AssertCalled(t, "Save", expPswdBkt)
-		bktStorage.AssertCalled(t, "Save", expIPBkt)
-	})
-
-	t.Run("true: new bkts", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		loginBktCap, pswdBktCap, ipBktCap, duration := uint(10), uint(100), uint(1000), time.Minute
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{loginBktCap, pswdBktCap, ipBktCap})
-
-		netStorage.On("GetList", model.White).Return([]*model.Net{}, nil)
-		netStorage.On("GetList", model.Black).Return([]*model.Net{}, nil)
-
-		inputLogin, inputPswd, inputIP := "login123", "login123p@ssw0rD", ipV4(192, 168, 72, 31)
-
-		bktStorage.On("Get", inputLogin).Return((*model.Bucket)(nil), nil)
-		bktStorage.On("Get", inputPswd).Return((*model.Bucket)(nil), nil)
-		bktStorage.On("Get", iptoa(inputIP)).Return((*model.Bucket)(nil), nil)
-
-		bktStorage.On("Save", mock.AnythingOfType("*model.Bucket")).Return(nil)
-
-		ok, err := rlsrv.Ok(inputLogin, inputPswd, inputIP)
-
-		require.True(t, ok)
-		require.NoError(t, err)
-
-		netStorage.AssertCalled(t, "GetList", model.White)
-		netStorage.AssertCalled(t, "GetList", model.Black)
-		bktStorage.AssertCalled(t, "Get", inputLogin)
-		bktStorage.AssertCalled(t, "Get", inputPswd)
-		bktStorage.AssertCalled(t, "Get", iptoa(inputIP))
-
-		require.Equal(t, 3, len(bktStorage.triedToSave))
-		require.Equal(t, inputLogin, bktStorage.triedToSave[0].ID)
-		require.Equal(t, loginBktCap, bktStorage.triedToSave[0].Capacity)
-		require.Equal(t, loginBktCap-1, bktStorage.triedToSave[0].FreeSpace)
-		require.Equal(t, duration, bktStorage.triedToSave[0].Duration)
-
-		require.Equal(t, inputPswd, bktStorage.triedToSave[1].ID)
-		require.Equal(t, pswdBktCap, bktStorage.triedToSave[1].Capacity)
-		require.Equal(t, pswdBktCap-1, bktStorage.triedToSave[1].FreeSpace)
-		require.Equal(t, duration, bktStorage.triedToSave[1].Duration)
-
-		require.Equal(t, iptoa(inputIP), bktStorage.triedToSave[2].ID)
-		require.Equal(t, ipBktCap, bktStorage.triedToSave[2].Capacity)
-		require.Equal(t, ipBktCap-1, bktStorage.triedToSave[2].FreeSpace)
-		require.Equal(t, duration, bktStorage.triedToSave[2].Duration)
-	})
+			require.Equal(t, err, tc.expErr)
+			require.Equal(t, tc.expResult, ok)
+			require.Equal(t, tc.expGetCallsCnt, bktStorage.getCallsCnt)
+			require.Equal(t, tc.expSaveCallsCnt, bktStorage.saveCallsCnt)
+		})
+	}
 }
 
 func TestReset(t *testing.T) {
-	t.Run("err: get login bkt", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
+	inLogin, inIP := "login123", ipV4(192, 168, 72, 31)
+	testCases := []struct {
+		name                            string
+		currLoginBkt, currIPBkt         *model.Bucket
+		errGetLoginBkt, errGetIPBkt     error
+		errSaveLoginBkt, errSaveIPBkt   error
+		expGetCallsCnt, expSaveCallsCnt int
+		expErr                          error
+	}{
+		{
+			name:            "err: get login bkt",
+			errGetLoginBkt:  errors.New("any err"),
+			expGetCallsCnt:  1,
+			expSaveCallsCnt: 0,
+			expErr:          fmt.Errorf("%s '%s': %w", errResetBucket, inLogin, errors.New("any err")),
+		},
+		{
+			name:            "err: get ip bkt",
+			currLoginBkt:    fullBkt(inLogin, 10),
+			errGetIPBkt:     errors.New("any err"),
+			expGetCallsCnt:  2,
+			expSaveCallsCnt: 0,
+			expErr:          fmt.Errorf("%s '%s': %w", errResetBucket, iptoa(inIP), errors.New("any err")),
+		},
+		{
+			name:            "err: login bkt not found",
+			currLoginBkt:    nil,
+			expGetCallsCnt:  1,
+			expSaveCallsCnt: 0,
+			expErr:          fmt.Errorf("%s: bucket '%s' not found", errResetBucket, inLogin),
+		},
+		{
+			name:            "err: ip bkt not found",
+			currLoginBkt:    fullBkt(inLogin, 10),
+			currIPBkt:       nil,
+			expGetCallsCnt:  2,
+			expSaveCallsCnt: 0,
+			expErr:          fmt.Errorf("%s: bucket '%s' not found", errResetBucket, iptoa(inIP)),
+		},
+		{
+			name:            "err: save login bkt",
+			currLoginBkt:    fullBkt(inLogin, 10),
+			currIPBkt:       fullBkt(iptoa(inIP), 1000),
+			errSaveLoginBkt: errors.New("any err"),
+			expGetCallsCnt:  2,
+			expSaveCallsCnt: 1,
+			expErr:          fmt.Errorf("%s '%s': %w", errResetBucket, inLogin, errors.New("any err")),
+		},
+		{
+			name:            "err: save ip bkt",
+			currLoginBkt:    fullBkt(inLogin, 10),
+			currIPBkt:       fullBkt(iptoa(inIP), 1000),
+			errSaveIPBkt:    errors.New("any err"),
+			expGetCallsCnt:  2,
+			expSaveCallsCnt: 2,
+			expErr:          fmt.Errorf("%s '%s': %w", errResetBucket, iptoa(inIP), errors.New("any err")),
+		},
+		{
+			name:            "success",
+			currLoginBkt:    fullBkt(inLogin, 10),
+			currIPBkt:       fullBkt(iptoa(inIP), 1000),
+			expGetCallsCnt:  2,
+			expSaveCallsCnt: 2,
+		},
+	}
 
-		inputLogin := "login123"
-		expErrStorage := errors.New("err get login bkt")
-		bktStorage.On("Get", inputLogin).Return((*model.Bucket)(nil), expErrStorage)
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			netStorage := &mockNetStorage{}
+			bktStorage := &mockBucketStorage{}
+			bktStorage.On("Get", inLogin).Return(tc.currLoginBkt, tc.errGetLoginBkt)
+			bktStorage.On("Get", iptoa(inIP)).Return(tc.currIPBkt, tc.errGetIPBkt)
+			bktStorage.On("Save", mock.MatchedBy(bktIDMatcher(inLogin))).Return(tc.errSaveLoginBkt)
+			bktStorage.On("Save", mock.MatchedBy(bktIDMatcher(iptoa(inIP)))).Return(tc.errSaveIPBkt)
 
-		err := rlsrv.Reset(inputLogin, ipV4(192, 168, 72, 31))
+			rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
 
-		require.EqualError(t, err, fmt.Sprintf("%s '%s': %v", errResetBucket, inputLogin, expErrStorage))
-		bktStorage.AssertCalled(t, "Get", inputLogin)
-	})
-
-	t.Run("err: get ip bkt", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		inputLogin := "login123"
-		inputIP := ipV4(192, 168, 72, 31)
-		expErrStorage := errors.New("err get ip bkt")
-
-		bktStorage.On("Get", inputLogin).Return(&model.Bucket{}, nil)
-		bktStorage.On("Get", iptoa(inputIP)).Return((*model.Bucket)(nil), expErrStorage)
-
-		err := rlsrv.Reset(inputLogin, inputIP)
-
-		require.EqualError(t, err, fmt.Sprintf("%s '%d': %v", errResetBucket, inputIP, expErrStorage))
-		bktStorage.AssertCalled(t, "Get", inputLogin)
-		bktStorage.AssertCalled(t, "Get", iptoa(inputIP))
-	})
-
-	t.Run("err: ip bkt not found", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		inputLogin := "login123"
-		inputIP := ipV4(192, 168, 72, 31)
-
-		bktStorage.On("Get", inputLogin).Return(&model.Bucket{}, nil)
-		bktStorage.On("Get", iptoa(inputIP)).Return((*model.Bucket)(nil), nil)
-
-		err := rlsrv.Reset(inputLogin, inputIP)
-
-		require.EqualError(t, err, fmt.Sprintf("%s: bucket '%d' not found", errResetBucket, inputIP))
-		bktStorage.AssertCalled(t, "Get", inputLogin)
-		bktStorage.AssertCalled(t, "Get", iptoa(inputIP))
-	})
-
-	t.Run("err: save login bkt", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		loginBktCap, pswdBktCap, ipBktCap, duration := uint(10), uint(100), uint(1000), time.Minute
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{loginBktCap, pswdBktCap, ipBktCap})
-
-		inputLogin := "login123"
-		inputIP := ipV4(192, 168, 72, 31)
-
-		foundLoginBkt := model.NewBucket(inputLogin, loginBktCap, duration)
-		foundLoginBkt.FreeSpace = 0
-		foundIPBkt := model.NewBucket(iptoa(inputIP), ipBktCap, duration)
-		foundIPBkt.FreeSpace = 0
-
-		bktStorage.On("Get", inputLogin).Return(foundLoginBkt, nil)
-		bktStorage.On("Get", iptoa(inputIP)).Return(foundIPBkt, nil)
-
-		expErrStorage := errors.New("err save login bkt")
-		bktStorage.On("Save", foundLoginBkt).Return(expErrStorage)
-
-		err := rlsrv.Reset(inputLogin, inputIP)
-
-		require.EqualError(t, err, fmt.Sprintf("%s '%s': %v", errResetBucket, inputLogin, expErrStorage))
-		bktStorage.AssertCalled(t, "Get", inputLogin)
-		bktStorage.AssertCalled(t, "Get", iptoa(inputIP))
-		require.Equal(t, loginBktCap, foundLoginBkt.FreeSpace)
-		require.Equal(t, ipBktCap, foundIPBkt.FreeSpace)
-		bktStorage.AssertCalled(t, "Save", foundLoginBkt)
-	})
-
-	t.Run("err: save ip bkt", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		loginBktCap, pswdBktCap, ipBktCap, duration := uint(10), uint(100), uint(1000), time.Minute
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{loginBktCap, pswdBktCap, ipBktCap})
-
-		inputLogin := "login123"
-		inputIP := ipV4(192, 168, 72, 31)
-
-		foundLoginBkt := model.NewBucket(inputLogin, loginBktCap, duration)
-		foundLoginBkt.FreeSpace = 0
-		foundIPBkt := model.NewBucket(iptoa(inputIP), ipBktCap, duration)
-		foundIPBkt.FreeSpace = 0
-
-		bktStorage.On("Get", inputLogin).Return(foundLoginBkt, nil)
-		bktStorage.On("Get", iptoa(inputIP)).Return(foundIPBkt, nil)
-
-		bktStorage.On("Save", foundLoginBkt).Return(nil)
-		expErrStorage := errors.New("err save ip bkt")
-		bktStorage.On("Save", foundIPBkt).Return(expErrStorage)
-
-		err := rlsrv.Reset(inputLogin, inputIP)
-
-		require.EqualError(t, err, fmt.Sprintf("%s '%d': %v", errResetBucket, inputIP, expErrStorage))
-		bktStorage.AssertCalled(t, "Get", inputLogin)
-		bktStorage.AssertCalled(t, "Get", iptoa(inputIP))
-		require.Equal(t, loginBktCap, foundLoginBkt.FreeSpace)
-		require.Equal(t, ipBktCap, foundIPBkt.FreeSpace)
-		bktStorage.AssertCalled(t, "Save", foundLoginBkt)
-		bktStorage.AssertCalled(t, "Save", foundIPBkt)
-	})
-
-	t.Run("success", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		loginBktCap, pswdBktCap, ipBktCap, duration := uint(10), uint(100), uint(1000), time.Minute
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{loginBktCap, pswdBktCap, ipBktCap})
-
-		inputLogin := "login123"
-		inputIP := ipV4(192, 168, 72, 31)
-
-		foundLoginBkt := model.NewBucket(inputLogin, loginBktCap, duration)
-		foundLoginBkt.FreeSpace = 0
-		foundIPBkt := model.NewBucket(iptoa(inputIP), ipBktCap, duration)
-		foundIPBkt.FreeSpace = 0
-
-		bktStorage.On("Get", inputLogin).Return(foundLoginBkt, nil)
-		bktStorage.On("Get", iptoa(inputIP)).Return(foundIPBkt, nil)
-		bktStorage.On("Save", foundLoginBkt).Return(nil)
-		bktStorage.On("Save", foundIPBkt).Return(nil)
-
-		err := rlsrv.Reset(inputLogin, inputIP)
-
-		require.NoError(t, err)
-		bktStorage.AssertCalled(t, "Get", inputLogin)
-		bktStorage.AssertCalled(t, "Get", iptoa(inputIP))
-		require.Equal(t, loginBktCap, foundLoginBkt.FreeSpace)
-		require.Equal(t, ipBktCap, foundIPBkt.FreeSpace)
-		bktStorage.AssertCalled(t, "Save", foundLoginBkt)
-		bktStorage.AssertCalled(t, "Save", foundIPBkt)
-	})
+			err := rlsrv.Reset(inLogin, inIP)
+			require.Equal(t, err, tc.expErr)
+			require.Equal(t, tc.expGetCallsCnt, bktStorage.getCallsCnt)
+			require.Equal(t, tc.expSaveCallsCnt, bktStorage.saveCallsCnt)
+			if err == nil {
+				require.True(t, tc.currLoginBkt.FreeSpace == tc.currLoginBkt.Capacity)
+				require.True(t, tc.currIPBkt.FreeSpace == tc.currIPBkt.Capacity)
+			}
+		})
+	}
 }
 
 func TestAddToList(t *testing.T) {
-	t.Run("err: get net", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
+	inMaskLen := uint8(16)
+	inIP := ipV4(192, 168, 72, 31)
+	expNetAddr := ipV4(192, 168, 0, 0)
+	inNetType := model.Black
 
-		expNetAddr := ipV4(192, 168, 72, 0)
-		expErrStorage := errors.New("error during getting net")
-		netStorage.On("Get", expNetAddr, model.Black).Return((*model.Net)(nil), expErrStorage)
+	testCases := []struct {
+		name                            string
+		errGetNet, errSaveNet           error
+		foundNet                        *model.Net
+		expGetCallsCnt, expSaveCallsCnt int
+		expErr                          error
+	}{
+		{
+			name:            "err: get net",
+			errGetNet:       errors.New("any err"),
+			expGetCallsCnt:  1,
+			expSaveCallsCnt: 0,
+			expErr:          fmt.Errorf("%s %s: %w", errAddIPToList, inNetType, errors.New("any err")),
+		},
+		{
+			name:            "success: found mask <= input mask",
+			foundNet:        &model.Net{Addr: expNetAddr, MaskLen: 8},
+			expGetCallsCnt:  1,
+			expSaveCallsCnt: 0,
+		},
+		{
+			name:            "success: found mask > input mask",
+			foundNet:        &model.Net{Addr: expNetAddr, MaskLen: 24},
+			expGetCallsCnt:  1,
+			expSaveCallsCnt: 1,
+		},
+		{
+			name:            "success: new net",
+			expGetCallsCnt:  1,
+			expSaveCallsCnt: 1,
+		},
+		{
+			name:            "err: save net",
+			errSaveNet:      errors.New("any err"),
+			expGetCallsCnt:  1,
+			expSaveCallsCnt: 1,
+			expErr:          fmt.Errorf("%s %s: %w", errAddIPToList, inNetType, errors.New("any err")),
+		},
+	}
 
-		err := rlsrv.AddToList(ipV4(192, 168, 72, 31), uint8(24), model.Black)
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			netStorage := &mockNetStorage{}
+			bktStorage := &mockBucketStorage{}
+			netStorage.On("Get", expNetAddr, inNetType).Return(tc.foundNet, tc.errGetNet)
+			netStorage.
+				On("Save", mock.MatchedBy(netMatcher(expNetAddr, inMaskLen)), model.Black).
+				Return(tc.errSaveNet)
 
-		require.EqualError(t, err, fmt.Sprintf("%s %s: %v", errAddIPToList, model.Black, expErrStorage))
-		netStorage.AssertCalled(t, "Get", expNetAddr, model.Black)
-	})
+			rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
 
-	t.Run("success: found mask <= input mask", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		inputIP := ipV4(192, 168, 0, 31)
-		inputMask := uint8(24)
-
-		expNetAddr := ipV4(192, 168, 0, 0)
-		expFoundNet := &model.Net{Addr: expNetAddr, MaskLen: 16}
-		netStorage.On("Get", expNetAddr, model.Black).Return(expFoundNet, nil)
-
-		err := rlsrv.AddToList(inputIP, inputMask, model.Black)
-		require.NoError(t, err)
-		netStorage.AssertCalled(t, "Get", expNetAddr, model.Black)
-		netStorage.AssertNotCalled(t, "Save")
-	})
-
-	t.Run("success: found mask > input mask", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		inputIP := ipV4(192, 168, 0, 31)
-		inputMask := uint8(16)
-
-		expNetAddr := ipV4(192, 168, 0, 0)
-		expFoundNet := &model.Net{Addr: expNetAddr, MaskLen: 24}
-		netStorage.On("Get", expNetAddr, model.Black).Return(expFoundNet, nil)
-
-		netStorage.On("Save", expFoundNet, model.Black).Return(nil)
-
-		err := rlsrv.AddToList(inputIP, inputMask, model.Black)
-
-		require.NoError(t, err)
-		require.Equal(t, inputMask, expFoundNet.MaskLen)
-		netStorage.AssertCalled(t, "Get", expNetAddr, model.Black)
-		netStorage.AssertCalled(t, "Save", expFoundNet, model.Black)
-	})
-
-	t.Run("success: new net", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		inputIP := ipV4(192, 168, 0, 31)
-		inputMask := uint8(24)
-
-		expNetAddr := ipV4(192, 168, 0, 0)
-		expNet := &model.Net{Addr: expNetAddr, MaskLen: 24}
-		netStorage.On("Get", expNetAddr, model.Black).Return((*model.Net)(nil), nil)
-		netStorage.On("Save", expNet, model.Black).Return(nil)
-
-		err := rlsrv.AddToList(inputIP, inputMask, model.Black)
-
-		require.NoError(t, err)
-		netStorage.AssertCalled(t, "Get", expNetAddr, model.Black)
-		netStorage.AssertCalled(t, "Save", expNet, model.Black)
-	})
-
-	t.Run("err: save net", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		inputIP := ipV4(192, 168, 0, 31)
-		inputMask := uint8(24)
-
-		expNetAddr := ipV4(192, 168, 0, 0)
-		expNet := &model.Net{Addr: expNetAddr, MaskLen: 24}
-		netStorage.On("Get", expNet.Addr, model.Black).Return((*model.Net)(nil), nil)
-
-		expErrStorage := errors.New("error during saving net")
-		netStorage.On("Save", expNet, model.Black).Return(expErrStorage)
-
-		err := rlsrv.AddToList(inputIP, inputMask, model.Black)
-
-		require.EqualError(t, err, fmt.Sprintf("%s %s: %v", errAddIPToList, model.Black, expErrStorage))
-		netStorage.AssertCalled(t, "Get", expNetAddr, model.Black)
-		netStorage.AssertCalled(t, "Save", expNet, model.Black)
-	})
+			err := rlsrv.AddToList(inIP, inMaskLen, inNetType)
+			require.Equal(t, err, tc.expErr)
+			require.Equal(t, tc.expGetCallsCnt, netStorage.getCallsCnt)
+			require.Equal(t, tc.expSaveCallsCnt, netStorage.saveCallsCnt)
+		})
+	}
 }
 
 func TestRemoveFromList(t *testing.T) {
-	t.Run("err: delete net", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
+	inMaskLen := uint8(16)
+	inIP := ipV4(192, 168, 72, 31)
+	expNetAddr := ipV4(192, 168, 0, 0)
+	inNetType := model.Black
 
-		inputIP := ipV4(192, 168, 72, 31)
-		inputMask := uint8(24)
+	testCases := []struct {
+		name           string
+		errDelNet      error
+		expDelCallsCnt int
+		expErr         error
+	}{
+		{
+			name:           "err: del net",
+			errDelNet:      errors.New("any err"),
+			expDelCallsCnt: 1,
+			expErr:         fmt.Errorf("%s %s: %w", errRemoveIPFromList, inNetType, errors.New("any err")),
+		},
+		{
+			name:           "success",
+			expDelCallsCnt: 1,
+		},
+	}
 
-		expNetAddr := ipV4(192, 168, 72, 0)
-		expErrStorage := errors.New("error during deleting net")
-		netStorage.On("Delete", expNetAddr, inputMask, model.Black).Return(expErrStorage)
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			netStorage := &mockNetStorage{}
+			bktStorage := &mockBucketStorage{}
+			netStorage.On("Delete", expNetAddr, inMaskLen, inNetType).Return(tc.errDelNet)
 
-		err := rlsrv.RemoveFromList(inputIP, inputMask, model.Black)
-		require.EqualError(t, err, fmt.Sprintf("%s %s: %v", errRemoveIPFromList, model.Black, expErrStorage))
-		netStorage.AssertCalled(t, "Delete", expNetAddr, inputMask, model.Black)
-	})
+			rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
 
-	t.Run("success", func(t *testing.T) {
-		netStorage := &mockNetStorage{}
-		bktStorage := &mockBucketStorage{}
-		rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
-
-		inputIP := ipV4(192, 168, 72, 31)
-		inputMask := uint8(24)
-
-		expNetAddr := ipV4(192, 168, 72, 0)
-		netStorage.On("Delete", expNetAddr, inputMask, model.Black).Return(nil)
-
-		err := rlsrv.RemoveFromList(inputIP, inputMask, model.Black)
-		require.NoError(t, err)
-		netStorage.AssertCalled(t, "Delete", expNetAddr, inputMask, model.Black)
-	})
+			err := rlsrv.RemoveFromList(inIP, inMaskLen, inNetType)
+			require.Equal(t, err, tc.expErr)
+			require.Equal(t, tc.expDelCallsCnt, netStorage.delCallsCnt)
+		})
+	}
 }
 
 func ipV4(ip ...byte) uint32 {
@@ -575,4 +458,24 @@ func ipV4(ip ...byte) uint32 {
 
 func iptoa(ip uint32) string {
 	return strconv.Itoa(int(ip))
+}
+
+func freeBkt(id string, capacity uint) *model.Bucket {
+	bkt := model.NewBucket(id, capacity, time.Minute)
+	bkt.FreeSpace = bkt.Capacity / 2
+	return bkt
+}
+
+func fullBkt(id string, capacity uint) *model.Bucket {
+	bkt := model.NewBucket(id, capacity, time.Minute)
+	bkt.FreeSpace = 0
+	return bkt
+}
+
+func bktIDMatcher(id string) func(bkt *model.Bucket) bool {
+	return func(bkt *model.Bucket) bool { return bkt.ID == id }
+}
+
+func netMatcher(netAddr uint32, maskLen uint8) func(net *model.Net) bool {
+	return func(net *model.Net) bool { return net.Addr == netAddr && net.MaskLen == maskLen }
 }

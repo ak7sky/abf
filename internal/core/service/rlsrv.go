@@ -54,16 +54,13 @@ func (rlsrv *RateLimitService) Ok(login string, pswd string, ip uint32) (bool, e
 		return false, nil
 	}
 
-	ok, err := rlsrv.addToBucket(model.LoginBkt, login)
-	if !ok {
+	if ok, err := rlsrv.addToBucket(model.LoginBkt, login); !ok {
 		return false, err
 	}
-	ok, err = rlsrv.addToBucket(model.PswdBkt, pswd)
-	if !ok {
+	if ok, err := rlsrv.addToBucket(model.PswdBkt, pswd); !ok {
 		return false, err
 	}
-	ok, err = rlsrv.addToBucket(model.IPBkt, strconv.Itoa(int(ip)))
-	if !ok {
+	if ok, err := rlsrv.addToBucket(model.IPBkt, strconv.Itoa(int(ip))); !ok {
 		return false, err
 	}
 
@@ -75,15 +72,14 @@ func (rlsrv *RateLimitService) Reset(login string, ip uint32) error {
 	if err != nil {
 		return fmt.Errorf("%s '%s': %w", errResetBucket, login, err)
 	}
-	ipBucket, err := rlsrv.bktStorage.Get(strconv.Itoa(int(ip)))
-	if err != nil {
-		return fmt.Errorf("%s '%d': %w", errResetBucket, ip, err)
-	}
-
 	if loginBucket == nil {
 		return fmt.Errorf("%s: bucket '%s' not found", errResetBucket, login)
 	}
 
+	ipBucket, err := rlsrv.bktStorage.Get(strconv.Itoa(int(ip)))
+	if err != nil {
+		return fmt.Errorf("%s '%d': %w", errResetBucket, ip, err)
+	}
 	if ipBucket == nil {
 		return fmt.Errorf("%s: bucket '%d' not found", errResetBucket, ip)
 	}
