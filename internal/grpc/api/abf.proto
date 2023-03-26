@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package api;
+option go_package = "./;api";
+
+import "google/protobuf/wrappers.proto";
+import "google/protobuf/empty.proto";
+
+service RateLimitService {
+  rpc CheckLimits(AuthData) returns (google.protobuf.BoolValue) {}
+  rpc ResetLimits(AuthData) returns (google.protobuf.Empty) {}
+  rpc AddToBlack (Ip) returns (google.protobuf.Empty) {}
+  rpc AddToWhite (Ip) returns (google.protobuf.Empty) {}
+  rpc RemoveFromBlack (Ip) returns (google.protobuf.Empty) {}
+  rpc RemoveFromWhite (Ip) returns (google.protobuf.Empty) {}
+}
+
+message AuthData {
+  string login = 1;
+  string pswd = 2;
+  uint32 ip = 3;
+}
+
+message Ip {
+  uint32 addr = 1;
+  uint32 maskLen = 2;
+}

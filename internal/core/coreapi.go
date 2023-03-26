@@ -2,7 +2,7 @@ package core
 
 import "github.com/ak7sky/abf-service/internal/core/model"
 
-type RateLimitingService interface {
+type RateLimitService interface {
 	Ok(login string, pswd string, ip uint32) (bool, error)
 	Reset(login string, ip uint32) error
 	AddToList(ip uint32, maskLen uint8, netType model.NetType) error
