@@ -29,10 +29,10 @@ type RateLimitService struct {
 	bktCap     BucketCapacities
 }
 
-func New(netStorage core.NetStorage, bucketStorage core.BucketStorage, bktCap BucketCapacities) *RateLimitService {
+func NewRateLimitService(ns core.NetStorage, bs core.BucketStorage, bktCap BucketCapacities) *RateLimitService {
 	return &RateLimitService{
-		netStorage: netStorage,
-		bktStorage: bucketStorage,
+		netStorage: ns,
+		bktStorage: bs,
 		bktCap:     bktCap,
 	}
 }

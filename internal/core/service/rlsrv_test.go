@@ -114,7 +114,7 @@ func TestOkIPCheck(t *testing.T) {
 			bktStorage := &mockBucketStorage{}
 			netStorage.On("GetList", model.White).Return(tc.whtList, tc.errGetWhtList)
 			netStorage.On("GetList", model.Black).Return(tc.blkList, tc.errGetBlkList)
-			rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
+			rlsrv := NewRateLimitService(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
 
 			ok, err := rlsrv.Ok("login123", "login123p@ssw0rD", inIP)
 			require.Equal(t, err, tc.expErr)
@@ -240,7 +240,7 @@ func TestOkBucketsCheck(t *testing.T) {
 			bktStorage.On("Save", mock.MatchedBy(bktIDMatcher(inPswd))).Return(tc.errSavePswdBkt)
 			bktStorage.On("Save", mock.MatchedBy(bktIDMatcher(iptoa(inIP)))).Return(tc.errSaveIPBkt)
 
-			rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
+			rlsrv := NewRateLimitService(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
 
 			ok, err := rlsrv.Ok(inLogin, inPswd, inIP)
 
@@ -330,7 +330,7 @@ func TestReset(t *testing.T) {
 			bktStorage.On("Save", mock.MatchedBy(bktIDMatcher(inLogin))).Return(tc.errSaveLoginBkt)
 			bktStorage.On("Save", mock.MatchedBy(bktIDMatcher(iptoa(inIP)))).Return(tc.errSaveIPBkt)
 
-			rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
+			rlsrv := NewRateLimitService(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
 
 			err := rlsrv.Reset(inLogin, inIP)
 			require.Equal(t, err, tc.expErr)
@@ -401,7 +401,7 @@ func TestAddToList(t *testing.T) {
 				On("Save", mock.MatchedBy(netMatcher(expNetAddr, inMaskLen)), model.Black).
 				Return(tc.errSaveNet)
 
-			rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
+			rlsrv := NewRateLimitService(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
 
 			err := rlsrv.AddToList(inIP, inMaskLen, inNetType)
 			require.Equal(t, err, tc.expErr)
@@ -443,7 +443,7 @@ func TestRemoveFromList(t *testing.T) {
 			bktStorage := &mockBucketStorage{}
 			netStorage.On("Delete", expNetAddr, inMaskLen, inNetType).Return(tc.errDelNet)
 
-			rlsrv := New(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
+			rlsrv := NewRateLimitService(netStorage, bktStorage, BucketCapacities{10, 100, 1000})
 
 			err := rlsrv.RemoveFromList(inIP, inMaskLen, inNetType)
 			require.Equal(t, err, tc.expErr)
